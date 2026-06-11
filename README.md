@@ -11,10 +11,18 @@ creates the virtualenv from `pyproject.toml`/`uv.lock` on first use (and
 fetches a matching Python if needed):
 
 ```
-uv run python aurora.py --scene ember --size 3840x2160 --preview
+cd devel-python
+git clone https://github.com/pavel-perina/aurora.git
+cd aurora
+uv run python aurora.py --scene ember --size 864x486
 uv run python aurora.py --scene orchid --size 7680x4320 --density 1.3 --seed 5
 ./render_all.sh                  # all five presets in 4K (uses uv)
 ```
+
+Result of the first command (8bit to save space)
+
+![aurora_ember_864x486.png](preview_ember.png)
+
 
 Without uv, install the three dependencies into any environment and run the
 script directly — it is a plain script, not a package:
