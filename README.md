@@ -4,9 +4,25 @@ Generates Windows-Vista-"Aurora"-like wallpapers as 16-bit PNG. Everything is
 computed in **linear RGB float32** and only converted to sRGB at save time, so
 the large soft gradients stay band-free even at 8K.
 
+## Setup and running
+
+With [uv](https://docs.astral.sh/uv/) nothing needs to be prepared — it
+creates the virtualenv from `pyproject.toml`/`uv.lock` on first use (and
+fetches a matching Python if needed):
+
 ```
 uv run python aurora.py --scene ember --size 3840x2160 --preview
 uv run python aurora.py --scene orchid --size 7680x4320 --density 1.3 --seed 5
+./render_all.sh                  # all five presets in 4K (uses uv)
+```
+
+Without uv, install the three dependencies into any environment and run the
+script directly — it is a plain script, not a package:
+
+```
+python3 -m venv .venv && . .venv/bin/activate
+pip install numpy scipy opencv-python-headless
+python aurora.py --scene vista --preview
 ```
 
 | flag        | meaning                                                        |
