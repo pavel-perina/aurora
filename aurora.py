@@ -89,11 +89,14 @@ class Blob:
 @dataclass
 class Curtain:
     n_knots: int          # knots of the random brightness profile across x
-    shear: float          # dx per dy (beam tilt)
     sharpness: float      # exponent on the positive noise -> sparser, harder beams
     strength: float       # multiplicative brightening at full power
     white: float          # additive white fraction at full power
     fade_pow: float       # vertical fade exponent, beams live at the top
+    shear: float = 0.15   # dx per dy (beam tilt), used when origin is None
+    origin: tuple[float, float] | None = None   # ray vanishing point in
+                          # normalized coords (y < 0 = above the frame);
+                          # beams become a fan of rays from this point
     smooth: float = 1.5   # profile smoothing in knot units
     seed_off: int = 0
 
@@ -181,8 +184,14 @@ def render_curtains(scene: Scene, W: int, H: int, rng: np.random.Generator,
         if prof.max() > 0:
             prof /= prof.max()
         prof = prof ** c.sharpness
-        u = (x + c.shear * y) / W
-        u -= np.floor(u)
+        if c.origin is not None:
+            # angle around a vanishing point above the frame -> diverging rays
+            ox, oy = c.origin
+            theta = np.arctan2(x / H - ox, y / H - oy)
+            u = (theta - theta.min()) / (theta.max() - theta.min() + 1e-9)
+        else:
+            u = (x + c.shear * y) / W
+            u -= np.floor(u)
         m = np.interp(u.ravel(), prof_x, prof).reshape(H, W).astype(np.float32)
         m *= (1.0 - v) ** c.fade_pow
         add += bg * (c.strength * m)[..., None]
@@ -267,128 +276,132 @@ def tonemap(img: np.ndarray, exposure: float, knee: float = 0.75) -> np.ndarray:
 
 # ---------------------------------------------------------------- scenes
 
-def scene_vista(seed: int) -> Scene:
-    rng = np.random.default_rng(seed)
-    pal = Palette(["#e8e03a", "#a8e83a", "#3ae87a", "#2ad8c8", "#27a0e8", "#8ad8ff"])
+@dataclass
+class Preset:
+    """Colors and intensity gains; the composition geometry is shared and
+    lives in build_scene()."""
+    ribbon: list[str]             # ribbon palette anchors, swept dark -> bright
+    base: str                     # backdrop color behind the gradient blobs
+    blobs: list[str]              # 5 colors: top-left, bottom-left, center,
+                                  # top-right, bottom-right
+    glow: str                     # horizon glow color
+    glow_strength: float = 0.3
+    wash: float = 1.0             # gain on the dense translucent sheet washes
+    line: float = 1.0             # gain on the crisp hairlines
+    curtain: float = 1.0          # gain on curtain ray brightening
+    curtain_white: float = 1.0    # gain on additive white in the rays
+    bloom_thresh: float = 0.55
+    bloom_strength: float = 0.3
+    exposure: float = 1.0
+    saturate: float = 1.15
+
+
+PRESETS = {
+    "vista": Preset(
+        ribbon=["#e8e03a", "#a8e83a", "#3ae87a", "#2ad8c8", "#27a0e8", "#8ad8ff"],
+        base="#1e7f86",
+        blobs=["#2e9e4f", "#e8d92e", "#1a8c96", "#2a6fa8", "#2596be"],
+        glow="#fdfff0", glow_strength=0.35, line=1.1, saturate=1.22),
+    "bronze": Preset(
+        ribbon=["#7a3b10", "#b4651a", "#e89b2a", "#ffd980", "#fff3cf"],
+        base="#4a2c14",
+        blobs=["#3a2410", "#c98a2a", "#5a3618", "#2e1c0e", "#8a5a20"],
+        glow="#ffe9b0", glow_strength=0.3, curtain=0.95, curtain_white=0.75,
+        bloom_thresh=0.5),
+    "ember": Preset(
+        ribbon=["#8a200a", "#b8320c", "#ef7012", "#ffb13a", "#fff0c0"],
+        base="#17181c",
+        blobs=["#101014", "#56250c", "#1d1f26", "#26282e", "#3a1c10"],
+        glow="#ff9a3a", glow_strength=0.18, wash=0.55, line=0.9,
+        curtain=1.5, curtain_white=0.35, bloom_thresh=0.5,
+        bloom_strength=0.25, saturate=1.1),
+    "orchid": Preset(
+        ribbon=["#6a2aa0", "#a44ae0", "#7a86e8", "#3ec4cf", "#eafaff"],
+        base="#2c2347",
+        blobs=["#45286a", "#8a3fae", "#33305e", "#1f5e74", "#2e8a96"],
+        glow="#e8f6ff", glow_strength=0.28, line=1.05, curtain=0.9,
+        curtain_white=0.6, bloom_thresh=0.5, saturate=1.18),
+    "glacier": Preset(
+        ribbon=["#1a3a8a", "#2a6fd0", "#3ab8e8", "#9ae8f0", "#f0fcff"],
+        base="#0e1c30",
+        blobs=["#11253f", "#1c4a6e", "#122a48", "#0b1626", "#1f5e80"],
+        glow="#cfeeff", glow_strength=0.22, wash=0.7,
+        curtain=1.3, curtain_white=0.5, bloom_thresh=0.5,
+        saturate=1.12),
+}
+
+
+def build_scene(p: Preset, density: float = 1.0) -> Scene:
+    """Shared composition: lower-left fan, pinch sheet on the right, faint
+    upper back-sheet, long streaks along the bottom. `density` scales the
+    hairline counts (1.0 = default, ~1.5 = busy, ~0.5 = sparse)."""
+    def L(n: float) -> int:
+        return max(2, int(round(n * density)))
     sheets = [
-        # big airy fan rising from the lower left
+        # big airy fan rising from the lower left up to mid-frame
         Sheet(A=[(-0.10, 1.02), (0.45, 0.96), (0.95, 0.92), (1.65, 0.86)],
-              B=[(-0.05, 0.30), (0.25, 0.75), (0.90, 0.95), (1.78, 0.66)],
-              bow=0.06, bow1=-0.03, n_chords=1600, alpha=0.020,
-              pal0=0.0, pal1=0.62, fade=0.12, lines=80, line_alpha=0.20),
+              B=[(-0.05, 0.20), (0.30, 0.52), (0.95, 0.78), (1.82, 0.48)],
+              bow=0.06, bow1=-0.03, n_chords=1600, alpha=0.026 * p.wash,
+              pal0=0.0, pal1=0.62, fade=0.12,
+              lines=L(110), line_alpha=0.22 * p.line),
         # sheet sweeping right into a pinch (chords nearly cross -> caustic)
-        Sheet(A=[(0.30, 1.08), (0.95, 0.93), (1.35, 0.82), (1.45, 0.62)],
-              B=[(1.90, 1.05), (1.55, 0.95), (1.38, 0.86), (1.30, 0.94)],
-              bow=-0.10, bow1=0.04, n_chords=1300, alpha=0.030,
-              pal0=0.35, pal1=1.0, fade=0.10, lines=55, line_alpha=0.16),
+        Sheet(A=[(0.30, 1.06), (0.90, 0.90), (1.30, 0.76), (1.40, 0.52)],
+              B=[(1.92, 0.98), (1.52, 0.88), (1.34, 0.78), (1.26, 0.88)],
+              bow=-0.10, bow1=0.04, n_chords=1300, alpha=0.032 * p.wash,
+              pal0=0.35, pal1=1.0, fade=0.10,
+              lines=L(70), line_alpha=0.18 * p.line),
         # faint upper back-sheet
         Sheet(A=[(-0.15, 0.55), (0.30, 0.25), (0.90, 0.10), (1.60, 0.18)],
               B=[(-0.10, 0.95), (0.50, 0.60), (1.10, 0.40), (1.85, 0.30)],
-              bow=0.05, n_chords=900, alpha=0.008,
-              pal0=0.55, pal1=1.0, fade=0.2),
+              bow=0.05, n_chords=900, alpha=0.008 * p.wash,
+              pal0=0.55, pal1=1.0, fade=0.2,
+              lines=L(18), line_alpha=0.04 * p.line),
+        # long shallow streaks hugging the bottom edge; guide curves run in
+        # opposite directions so the chords cross mid-frame
+        Sheet(A=[(-0.10, 0.86), (0.50, 0.92), (1.10, 0.98), (1.95, 0.96)],
+              B=[(1.95, 1.06), (1.30, 1.02), (0.60, 1.04), (-0.10, 1.04)],
+              bow=0.03, n_chords=700, alpha=0.005 * p.wash,
+              pal0=0.10, pal1=0.80, fade=0.18,
+              lines=L(45), line_alpha=0.09 * p.line),
+        # narrow silk band climbing the left edge
+        Sheet(A=[(-0.08, 0.95), (0.05, 0.75), (0.02, 0.50), (0.12, 0.28)],
+              B=[(0.35, 1.00), (0.45, 0.75), (0.40, 0.45), (0.65, 0.15)],
+              bow=0.05, n_chords=800, alpha=0.010 * p.wash,
+              pal0=0.0, pal1=0.45, fade=0.15,
+              lines=L(40), line_alpha=0.10 * p.line),
+        # band rising from the pinch region along the right edge
+        Sheet(A=[(1.30, 0.92), (1.45, 0.70), (1.55, 0.45), (1.60, 0.12)],
+              B=[(1.95, 0.95), (1.85, 0.65), (1.92, 0.40), (1.75, 0.05)],
+              bow=-0.04, n_chords=800, alpha=0.010 * p.wash,
+              pal0=0.70, pal1=1.0, fade=0.15,
+              lines=L(40), line_alpha=0.10 * p.line),
     ]
+    blob_geo = [(0.15, 0.05, 0.45, 1.3), (0.05, 0.95, 0.40, 1.5),
+                (1.05, 0.35, 0.60, 1.2), (1.80, 0.25, 0.55, 1.4),
+                (1.85, 0.95, 0.45, 1.0)]
     return Scene(
-        base="#1e7f86",
-        blobs=[
-            Blob(0.15, 0.05, 0.45, "#2e9e4f", 1.3),
-            Blob(0.05, 0.95, 0.40, "#e8d92e", 1.5),
-            Blob(1.05, 0.35, 0.60, "#1a8c96", 1.2),
-            Blob(1.80, 0.25, 0.55, "#2a6fa8", 1.4),
-            Blob(1.85, 0.95, 0.45, "#2596be", 1.0),
-        ],
+        base=p.base,
+        blobs=[Blob(x, y, s, c, w) for (x, y, s, w), c in zip(blob_geo, p.blobs)],
         curtains=[
-            Curtain(n_knots=22, shear=0.18, sharpness=2.2, strength=0.55,
-                    white=0.04, fade_pow=1.6),
-            Curtain(n_knots=60, shear=0.10, sharpness=3.5, strength=0.30,
-                    white=0.05, fade_pow=2.2, seed_off=7),
+            Curtain(n_knots=26, origin=(0.65, -0.55), sharpness=2.2,
+                    strength=0.55 * p.curtain, white=0.04 * p.curtain_white,
+                    fade_pow=1.6),
+            Curtain(n_knots=70, origin=(1.05, -0.90), sharpness=3.5,
+                    strength=0.30 * p.curtain, white=0.05 * p.curtain_white,
+                    fade_pow=2.2, seed_off=7),
         ],
-        ribbon_palette=pal, sheets=sheets,
-        glow_y=1.07, glow_sigma=0.06, glow_color="#fdfff0", glow_strength=0.35,
-        bloom_thresh=0.55, bloom_strength=0.3, exposure=1.0, saturate=1.22)
-
-
-def scene_bronze(seed: int) -> Scene:
-    rng = np.random.default_rng(seed)
-    pal = Palette(["#7a3b10", "#b4651a", "#e89b2a", "#ffd980", "#fff3cf"])
-    sheets = [
-        Sheet(A=[(-0.10, 1.02), (0.45, 0.96), (0.95, 0.92), (1.65, 0.86)],
-              B=[(-0.05, 0.30), (0.25, 0.75), (0.90, 0.95), (1.78, 0.66)],
-              bow=0.06, bow1=-0.03, n_chords=1600, alpha=0.025,
-              pal0=0.25, pal1=0.95, fade=0.12, lines=80, line_alpha=0.18),
-        Sheet(A=[(0.30, 1.08), (0.95, 0.93), (1.35, 0.82), (1.45, 0.62)],
-              B=[(1.90, 1.05), (1.55, 0.95), (1.38, 0.86), (1.30, 0.94)],
-              bow=-0.10, bow1=0.04, n_chords=1300, alpha=0.028,
-              pal0=0.45, pal1=1.0, fade=0.10, lines=55, line_alpha=0.14),
-        Sheet(A=[(-0.15, 0.55), (0.30, 0.25), (0.90, 0.10), (1.60, 0.18)],
-              B=[(-0.10, 0.95), (0.50, 0.60), (1.10, 0.40), (1.85, 0.30)],
-              bow=0.05, n_chords=900, alpha=0.007,
-              pal0=0.4, pal1=0.9, fade=0.2),
-    ]
-    return Scene(
-        base="#4a2c14",
-        blobs=[
-            Blob(0.15, 0.05, 0.45, "#3a2410", 1.3),
-            Blob(0.05, 0.95, 0.40, "#c98a2a", 1.5),
-            Blob(1.05, 0.35, 0.60, "#5a3618", 1.2),
-            Blob(1.80, 0.25, 0.55, "#2e1c0e", 1.4),
-            Blob(1.85, 0.95, 0.45, "#8a5a20", 1.0),
-        ],
-        curtains=[
-            Curtain(n_knots=22, shear=0.18, sharpness=2.2, strength=0.50,
-                    white=0.03, fade_pow=1.6),
-            Curtain(n_knots=60, shear=0.10, sharpness=3.5, strength=0.30,
-                    white=0.03, fade_pow=2.2, seed_off=7),
-        ],
-        ribbon_palette=pal, sheets=sheets,
-        glow_y=1.07, glow_sigma=0.06, glow_color="#ffe9b0", glow_strength=0.3,
-        bloom_thresh=0.5, bloom_strength=0.3, exposure=1.0, saturate=1.15)
-
-
-def scene_ember(seed: int) -> Scene:
-    rng = np.random.default_rng(seed)
-    pal = Palette(["#5a0e08", "#a82a0c", "#e8650f", "#ffa62a", "#ffe9a8"])
-    sheets = [
-        Sheet(A=[(-0.10, 1.02), (0.45, 0.96), (0.95, 0.92), (1.65, 0.86)],
-              B=[(-0.05, 0.30), (0.25, 0.75), (0.90, 0.95), (1.78, 0.66)],
-              bow=0.06, bow1=-0.03, n_chords=1600, alpha=0.022,
-              pal0=0.3, pal1=0.9, fade=0.12, lines=80, line_alpha=0.16),
-        Sheet(A=[(0.30, 1.08), (0.95, 0.93), (1.35, 0.82), (1.45, 0.62)],
-              B=[(1.90, 1.05), (1.55, 0.95), (1.38, 0.86), (1.30, 0.94)],
-              bow=-0.10, bow1=0.04, n_chords=1300, alpha=0.025,
-              pal0=0.45, pal1=1.0, fade=0.10, lines=55, line_alpha=0.14),
-        Sheet(A=[(-0.15, 0.55), (0.30, 0.25), (0.90, 0.10), (1.60, 0.18)],
-              B=[(-0.10, 0.95), (0.50, 0.60), (1.10, 0.40), (1.85, 0.30)],
-              bow=0.05, n_chords=900, alpha=0.006,
-              pal0=0.3, pal1=0.8, fade=0.2),
-    ]
-    return Scene(
-        base="#17181c",
-        blobs=[
-            Blob(0.15, 0.05, 0.45, "#101014", 1.3),
-            Blob(0.05, 0.95, 0.40, "#56250c", 1.5),
-            Blob(1.05, 0.35, 0.60, "#1d1f26", 1.2),
-            Blob(1.80, 0.25, 0.55, "#26282e", 1.4),
-            Blob(1.85, 0.95, 0.45, "#3a1c10", 1.0),
-        ],
-        curtains=[
-            Curtain(n_knots=22, shear=0.18, sharpness=2.2, strength=0.8,
-                    white=0.015, fade_pow=1.6),
-            Curtain(n_knots=60, shear=0.10, sharpness=3.5, strength=0.5,
-                    white=0.015, fade_pow=2.2, seed_off=7),
-        ],
-        ribbon_palette=pal, sheets=sheets,
-        glow_y=1.07, glow_sigma=0.06, glow_color="#ff9a3a", glow_strength=0.18,
-        bloom_thresh=0.5, bloom_strength=0.25, exposure=1.0, saturate=1.1)
-
-
-SCENES = {"vista": scene_vista, "bronze": scene_bronze, "ember": scene_ember}
+        ribbon_palette=Palette(p.ribbon), sheets=sheets,
+        glow_y=1.07, glow_sigma=0.06, glow_color=p.glow,
+        glow_strength=p.glow_strength,
+        bloom_thresh=p.bloom_thresh, bloom_strength=p.bloom_strength,
+        exposure=p.exposure, saturate=p.saturate)
 
 
 # ---------------------------------------------------------------- main
 
-def render(scene: Scene, W: int, H: int, ss: int) -> np.ndarray:
+def render(scene: Scene, W: int, H: int, ss: int, seed: int = 0) -> np.ndarray:
     rw, rh = W * ss, H * ss
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(seed)
     t0 = time.time()
     img = render_background(scene, rw, rh)
     img += render_curtains(scene, rw, rh, rng, img)
@@ -419,20 +432,22 @@ def save_preview(img: np.ndarray, path: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--scene", default="vista", choices=sorted(SCENES))
+    ap.add_argument("--scene", default="vista", choices=sorted(PRESETS))
     ap.add_argument("--size", default="1920x1080")
     ap.add_argument("--ss", type=int, default=2, help="supersampling factor")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=0, help="varies the curtain rays")
+    ap.add_argument("--density", type=float, default=1.0,
+                    help="hairline density multiplier (0.5 sparse .. 1.5 busy)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--preview", action="store_true",
                     help="also write an 8-bit JPEG next to the PNG")
     args = ap.parse_args()
 
     W, H = (int(v) for v in args.size.split("x"))
-    scene = SCENES[args.scene](args.seed)
+    scene = build_scene(PRESETS[args.scene], density=args.density)
     out = args.out or f"aurora_{args.scene}_{W}x{H}.png"
     print(f"rendering {args.scene} {W}x{H} ss={args.ss}")
-    img = render(scene, W, H, args.ss)
+    img = render(scene, W, H, args.ss, args.seed)
     save16(img, out)
     print(f"wrote {out}")
     if args.preview:
