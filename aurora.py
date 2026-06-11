@@ -120,12 +120,29 @@ class Sheet:
 
 
 @dataclass
+class Fern:
+    """Experimental: Barnsley-fern IFS rendered as additive luminous dust.
+    Density is points per output pixel^2, so brightness is resolution- and
+    supersampling-independent."""
+    x: float = 0.89                       # base position, normalized coords
+    y: float = 0.98
+    height: float = 0.82                  # in H units
+    tilt: float = 0.0                     # lean, radians
+    density: float = 3.0                  # chaos-game points per pixel^2
+    alpha: float = 0.045                  # brightness each point deposits
+    pal0: float = 0.05                    # palette sweep base -> tip
+    pal1: float = 0.75
+    seed: int = 2
+
+
+@dataclass
 class Scene:
     base: str                             # backdrop color behind the blobs
     blobs: list[Blob]
     curtains: list[Curtain]
     ribbon_palette: Palette
     sheets: list[Sheet]
+    ferns: list[Fern] = field(default_factory=list)
     glow_y: float = 1.0                   # horizon glow center (normalized y)
     glow_sigma: float = 0.08
     glow_color: str = "#ffffff"
@@ -249,6 +266,76 @@ def render_sheets(scene: Scene, W: int, H: int, ss: int) -> np.ndarray:
             idx = iy * W + ix
             for ch in range(3):
                 flat[:, ch] += np.bincount(idx, weights=w * wrgb[:, ch], minlength=n)
+    return acc.astype(np.float32)
+
+
+# Barnsley fern affine maps: a, b, c, d, e, f, probability
+_FERN_MAPS = np.array([
+    [0.00, 0.00, 0.00, 0.16, 0.0, 0.00, 0.01],   # stem
+    [0.85, 0.04, -0.04, 0.85, 0.0, 1.60, 0.85],  # main frond
+    [0.20, -0.26, 0.23, 0.22, 0.0, 1.60, 0.07],  # left leaflets
+    [-0.15, 0.28, 0.26, 0.24, 0.0, 0.44, 0.07],  # right leaflets
+])
+
+
+def render_ferns(scene: Scene, W: int, H: int) -> np.ndarray:
+    acc = np.zeros((H, W, 3), dtype=np.float64)
+    flat = acc.reshape(-1, 3)
+    pal = scene.ribbon_palette
+    npix = W * H
+    for fn in scene.ferns:
+        rng = np.random.default_rng(fn.seed)
+        n_total = int(fn.density * H * H)
+        chains = 16384
+        burn = 24
+        cum = np.cumsum(_FERN_MAPS[:, 6])
+        scale = fn.height * H / 9.9983            # fern bbox: y in [0, 9.9983]
+        ct, st = np.cos(fn.tilt), np.sin(fn.tilt)
+        bx, by = fn.x * H, fn.y * H
+        x = np.zeros(chains)
+        y = np.zeros(chains)
+
+        def flush(xs: list[np.ndarray], ys: list[np.ndarray]) -> None:
+            fxr, fyr = np.concatenate(xs), np.concatenate(ys)
+            # fern coords -> image px (y grows upward), with lean
+            dx, dy = fxr * scale, fyr * scale
+            px = bx + dx * ct + dy * st
+            py = by - (dy * ct - dx * st)
+            ok = (px >= 0) & (px < W - 1) & (py >= 0) & (py < H - 1)
+            wrgb = fn.alpha * pal(fn.pal0 + (fn.pal1 - fn.pal0) * fyr[ok] / 9.9983)
+            px, py = px[ok], py[ok]
+            x0 = px.astype(np.int64)
+            y0 = py.astype(np.int64)
+            fx, fy = px - x0, py - y0
+            for ix, iy, w in ((x0, y0, (1 - fx) * (1 - fy)),
+                              (x0 + 1, y0, fx * (1 - fy)),
+                              (x0, y0 + 1, (1 - fx) * fy),
+                              (x0 + 1, y0 + 1, fx * fy)):
+                idx = iy * W + ix
+                for ch in range(3):
+                    flat[:, ch] += np.bincount(idx, weights=w * wrgb[:, ch],
+                                               minlength=npix)
+
+        done = 0
+        step = 0
+        bufx: list[np.ndarray] = []
+        bufy: list[np.ndarray] = []
+        buffered = 0
+        while done < n_total:
+            r = rng.random(chains)
+            k = np.searchsorted(cum, r)
+            a, b, c, d, e, f = (_FERN_MAPS[k, j] for j in range(6))
+            x, y = a * x + b * y + e, c * x + d * y + f
+            step += 1
+            if step <= burn:
+                continue
+            bufx.append(x.copy())
+            bufy.append(y.copy())
+            buffered += chains
+            done += chains
+            if buffered >= 2_000_000 or done >= n_total:
+                flush(bufx, bufy)
+                bufx, bufy, buffered = [], [], 0
     return acc.astype(np.float32)
 
 
@@ -408,6 +495,9 @@ def render(scene: Scene, W: int, H: int, ss: int, seed: int = 0) -> np.ndarray:
     print(f"  bg+curtains  {time.time() - t0:6.1f}s")
     img += render_sheets(scene, rw, rh, ss)
     print(f"  +sheets      {time.time() - t0:6.1f}s")
+    if scene.ferns:
+        img += render_ferns(scene, rw, rh)
+        print(f"  +ferns       {time.time() - t0:6.1f}s")
     img = add_glow_and_bloom(img, scene, rw, rh)
     img = tonemap(img, scene.exposure)
     if scene.saturate != 1.0:
@@ -438,6 +528,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0, help="varies the curtain rays")
     ap.add_argument("--density", type=float, default=1.0,
                     help="hairline density multiplier (0.5 sparse .. 1.5 busy)")
+    ap.add_argument("--fern", action="store_true",
+                    help="experimental: central Barnsley fern, prominent "
+                         "ribbon sheets disabled")
     ap.add_argument("--out", default=None)
     ap.add_argument("--preview", action="store_true",
                     help="also write an 8-bit JPEG next to the PNG")
@@ -445,6 +538,9 @@ def main() -> None:
 
     W, H = (int(v) for v in args.size.split("x"))
     scene = build_scene(PRESETS[args.scene], density=args.density)
+    if args.fern:
+        scene.sheets = scene.sheets[2:]   # drop the big fan and the pinch sheet
+        scene.ferns.append(Fern())
     out = args.out or f"aurora_{args.scene}_{W}x{H}.png"
     print(f"rendering {args.scene} {W}x{H} ss={args.ss}")
     img = render(scene, W, H, args.ss, args.seed)

@@ -40,6 +40,7 @@ python aurora.py --scene vista --preview
 | `--ss`      | supersampling factor (default 2; rendering happens at size×ss) |
 | `--seed`    | varies the curtain-ray pattern (only randomness in the image)  |
 | `--density` | hairline-count multiplier (0.5 sparse … 1.5 busy)              |
+| `--fern`    | central Barnsley fern; the two dominant ribbon sheets are off  |
 | `--preview` | also write an 8-bit JPEG next to the PNG                       |
 
 ## Rendering pipeline
@@ -92,6 +93,19 @@ Each sheet is rendered twice:
 
 `alpha` is "brightness a single chord adds per pixel it crosses", so values
 are resolution-independent.
+
+### 3b. Fern (`render_ferns`, optional via `--fern`)
+A Barnsley-fern IFS rendered as additive luminous dust: 16k parallel
+chaos-game chains are iterated with numpy and bilinear-splatted into the
+same float accumulator the ribbons use (millions of points, a few seconds
+at 720p). Where the IFS measure is dense — leaflet spines and tips — energy
+stacks up and the bloom pass catches it, so the fern reads as glowing frost
+rather than a flat silhouette. Color sweeps the preset's ribbon palette from
+base to tip; point density is per output pixel², so brightness is identical
+at any resolution or supersampling factor. Parameters (position, height,
+lean, density, palette range) live on the `Fern` dataclass. The same
+chain-parallel splatting scheme extends to other iterated maps and strange
+attractors — only the step function and a bounding-box warmup differ.
 
 ### 4. Post (`add_glow_and_bloom`, `tonemap`)
 - Horizon glow: one wide additive Gaussian band centered slightly below the
